@@ -2329,6 +2329,54 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # TEMPORARY maintenance job (throwaway branch, never merged): inventory the
+  # MI35x pool's shared HF cache. Runs only when named in job_filter.
+  mi35x-hf-cache-maint:
+    name: ${{ format('mi35x-hf-cache-maint ({0}, linux-mi35x-gpu-8)', matrix.probe) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        probe: [a, b, c]
+    if: github.repository == 'sgl-project/sglang' && contains(format(',{0},', inputs.job_filter), ',mi35x-hf-cache-maint,')
+    runs-on: linux-mi35x-gpu-8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Host view of the cache mount
+        run: |
+          echo "runner=$RUNNER_NAME host=$(hostname)"
+          df -hT /home/runner/sglang-data || true
+          findmnt -T /home/runner/sglang-data || true
+          ls -la /home/runner/sglang-data || true
+
+      - name: Setup docker
+        run: bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          ENABLE_CACHE_HOST: "1"
+
+      - name: Inventory HF cache
+        timeout-minutes: 60
+        run: |
+          cat > inventory.sh <<'SCRIPT'
+          cd /sgl-data
+          echo "=== df ==="; df -h /sgl-data
+          echo "=== top-level ==="; du -sh /sgl-data/* 2>/dev/null | sort -h
+          echo "=== models: size|name|snapshot mtime|newest blob atime ==="
+          for d in /sgl-data/hf-cache/hub/models--*; do
+            sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+            mt=$(stat -c %y "$d/snapshots" 2>/dev/null | cut -d. -f1)
+            at=$(find "$d/blobs" -type f -printf '%A+\n' 2>/dev/null | sort | tail -1 | cut -d. -f1)
+            echo "$sz|$(basename "$d")|mtime=$mt|atime=$at"
+          done | sort -h
+          echo "=== incomplete downloads ==="
+          find /sgl-data/hf-cache/hub -name '*.incomplete' -printf '%s %p\n' 2>/dev/null | sort -n | tail -20
+          echo "=== datasets ==="; du -sh /sgl-data/hf-cache/hub/datasets--* 2>/dev/null | sort -h | tail -20
+          SCRIPT
+          docker cp inventory.sh ci_sglang:/tmp/inventory.sh
+          docker exec ci_sglang bash /tmp/inventory.sh
+
   check-all-jobs:
     if: always() && (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     needs:
