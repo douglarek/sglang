@@ -2329,26 +2329,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-  # TEMPORARY maintenance job (throwaway branch, never merged): inventory the
-  # MI35x pool's shared HF cache. Runs only when named in job_filter.
+  # TEMPORARY maintenance job (throwaway branch, never merged): free space on
+  # the MI35x pool's shared HF cache. Runs only when named in job_filter.
   mi35x-hf-cache-maint:
-    name: ${{ format('mi35x-hf-cache-maint ({0}, linux-mi35x-gpu-8)', matrix.probe) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        probe: [a, b, c]
+    name: mi35x-hf-cache-maint (linux-mi35x-gpu-8)
     if: github.repository == 'sgl-project/sglang' && contains(format(',{0},', inputs.job_filter), ',mi35x-hf-cache-maint,')
     runs-on: linux-mi35x-gpu-8
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Host view of the cache mount
-        run: |
-          echo "runner=$RUNNER_NAME host=$(hostname)"
-          df -hT /home/runner/sglang-data || true
-          findmnt -T /home/runner/sglang-data || true
-          ls -la /home/runner/sglang-data || true
 
       - name: Setup docker
         run: bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
@@ -2356,26 +2345,31 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
           ENABLE_CACHE_HOST: "1"
 
-      - name: Inventory HF cache
-        timeout-minutes: 60
+      - name: Delete stale checkpoints
+        timeout-minutes: 90
         run: |
-          cat > inventory.sh <<'SCRIPT'
-          cd /sgl-data
-          echo "=== df ==="; df -h /sgl-data
-          echo "=== top-level ==="; du -sh /sgl-data/* 2>/dev/null | sort -h
-          echo "=== models: size|name|snapshot mtime|newest blob atime ==="
-          for d in /sgl-data/hf-cache/hub/models--*; do
-            sz=$(du -sh "$d" 2>/dev/null | cut -f1)
-            mt=$(stat -c %y "$d/snapshots" 2>/dev/null | cut -d. -f1)
-            at=$(find "$d/blobs" -type f -printf '%A+\n' 2>/dev/null | sort | tail -1 | cut -d. -f1)
-            echo "$sz|$(basename "$d")|mtime=$mt|atime=$at"
-          done | sort -h
-          echo "=== incomplete downloads ==="
-          find /sgl-data/hf-cache/hub -name '*.incomplete' -printf '%s %p\n' 2>/dev/null | sort -n | tail -20
-          echo "=== datasets ==="; du -sh /sgl-data/hf-cache/hub/datasets--* 2>/dev/null | sort -h | tail -20
+          cat > cleanup.sh <<'SCRIPT'
+          set -u
+          hub=/sgl-data/hf-cache/hub
+          echo "=== df before ==="; df -h /sgl-data
+          for m in \
+            models--zai-org--GLM-5.2-FP8 \
+            models--zai-org--GLM-5.1-FP8 \
+            models--moonshotai--Kimi-K2.6 \
+            models--amd--Qwen3-235B-A22B-Instruct-2507-mxfp4; do
+            if [ -d "$hub/$m" ]; then
+              echo "--- removing $m ($(du -sh "$hub/$m" | cut -f1))"
+              rm -rf "$hub/$m"
+            else
+              echo "--- $m not present"
+            fi
+          done
+          ls "$hub/.sglang_locks" 2>/dev/null | grep -iE "glm-5.2-fp8|glm-5.1-fp8|kimi-k2.6|qwen3-235b-a22b-instruct-2507-mxfp4" \
+            | while read -r l; do rm -f "$hub/.sglang_locks/$l"; echo "removed lock $l"; done
+          echo "=== df after ==="; df -h /sgl-data
           SCRIPT
-          docker cp inventory.sh ci_sglang:/tmp/inventory.sh
-          docker exec ci_sglang bash /tmp/inventory.sh
+          docker cp cleanup.sh ci_sglang:/tmp/cleanup.sh
+          docker exec ci_sglang bash /tmp/cleanup.sh
 
   check-all-jobs:
     if: always() && (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
